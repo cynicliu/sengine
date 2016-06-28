@@ -64,6 +64,7 @@ typedef struct {
 
     uint64_t                            frag;
     uint64_t                            frag_ts;
+    uint64_t                            frag_start_ts;
     uint64_t                            key_id;
     ngx_uint_t                          nfrags;
     ngx_rtmp_hls_frag_t                *frags; /* circular 2 * winfrags + 1 */
@@ -962,6 +963,7 @@ ngx_rtmp_hls_open_fragment(ngx_rtmp_session_t *s, uint64_t ts,
     f->key_id = ctx->key_id;
 
     ctx->frag_ts = ts;
+    ctx->frag_start_ts = ngx_current_msec;
 
     /* start fragment with audio to make iPhone happy */
 
@@ -1568,7 +1570,7 @@ ngx_rtmp_hls_update_fragment(ngx_rtmp_session_t *s, uint64_t ts,
     ngx_msec_t                  ts_frag_len;
     ngx_int_t                   same_frag, force,discont;
     ngx_buf_t                  *b;
-    int64_t                     d;
+    int64_t                     d, dr;
 
     hacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_hls_module);
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
@@ -1579,12 +1581,18 @@ ngx_rtmp_hls_update_fragment(ngx_rtmp_session_t *s, uint64_t ts,
     if (ctx->opened) {
         f = ngx_rtmp_hls_get_frag(s, ctx->nfrags);
         d = (int64_t) (ts - ctx->frag_ts);
+        dr = (int64_t) (ngx_current_msec - ctx->frag_start_ts);
 
         if (d > (int64_t) hacf->max_fraglen * 90 || d < -90000) {
             ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
                           "hls: force fragment split: %.3f sec, ", d / 90000.);
             force = 1;
 
+        } else if (d <= (int64_t) hacf->max_fraglen * 90 && d >= -90000 && dr >= (int64_t)(hacf->max_fraglen)) {
+            ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                         "hls: force fragment split: %.3f sec, ts size be too large", d / 90000.);
+            force = 1;
+            f->duration = dr / 1000.;
         } else {
             f->duration = (ts - ctx->frag_ts) / 90000.;
             discont = 0;
@@ -2358,7 +2366,7 @@ ngx_rtmp_hls_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
         }
 
         cleanup->path = conf->path;
-        cleanup->playlen = conf->playlen;
+        cleanup->playlen = conf->max_fraglen != 5000 * 10 && conf->max_fraglen * (conf->playlen / conf->fraglen) > conf->playlen ? conf->max_fraglen * (conf->playlen / conf->fraglen) : conf->playlen;
 
         conf->slot = ngx_pcalloc(cf->pool, sizeof(*conf->slot));
         if (conf->slot == NULL) {

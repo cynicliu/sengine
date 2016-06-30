@@ -10,7 +10,6 @@
 #include "ngx_rtmp_proxy_protocol.h"
 
 
-static void ngx_rtmp_close_connection(ngx_connection_t *c);
 static u_char * ngx_rtmp_log_error(ngx_log_t *log, u_char *buf, size_t len);
 
 
@@ -186,6 +185,7 @@ ngx_rtmp_init_session(ngx_connection_t *c, ngx_rtmp_addr_conf_t *addr_conf)
         return NULL;
     }
 
+    s->addr_conf = addr_conf;
     cscf = ngx_rtmp_get_module_srv_conf(s, ngx_rtmp_core_module);
 
     s->out_queue = cscf->out_queue;
@@ -244,12 +244,18 @@ ngx_rtmp_log_error(ngx_log_t *log, u_char *buf, size_t len)
     p = ngx_snprintf(buf, len, ", server: %V", s->addr_text);
     len -= p - buf;
     buf = p;
+    
+    p = ngx_snprintf(buf, len, 
+            ", session: vhost='%V' app='%V' name='%V' args='%V'",
+            &s->host_in, &s->app, &s->name, &s->args);
+    len -= p - buf;
+    buf = p;
 
     return p;
 }
 
 
-static void
+void
 ngx_rtmp_close_connection(ngx_connection_t *c)
 {
     ngx_pool_t                         *pool;

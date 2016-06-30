@@ -155,6 +155,9 @@ ngx_rtmp_control_drop_handler(ngx_http_request_t *r, ngx_rtmp_session_t *s)
 
     ctx = ngx_http_get_module_ctx(r, ngx_rtmp_control_module);
 
+    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                   "rtmp_control: drop session");
+
     ngx_rtmp_finalize_session(s);
 
     ++ctx->count;
@@ -314,6 +317,8 @@ ngx_rtmp_control_walk_app(ngx_http_request_t *r,
 {
     size_t                     len;
     ngx_str_t                  name;
+    u_char                     path[NGX_RTMP_MAX_NAME];
+    size_t                     path_len = 0;
     const char                *s;
     ngx_uint_t                 n;
     ngx_rtmp_live_stream_t    *ls;
@@ -335,11 +340,14 @@ ngx_rtmp_control_walk_app(ngx_http_request_t *r,
         return NGX_CONF_OK;
     }
 
-    for (ls = lacf->streams[ngx_hash_key(name.data, name.len) % lacf->nbuckets];
+    *ngx_sprintf(path, "%V/%V", &cacf->name, &name) = 0;
+    path_len = ngx_strlen(path);
+    
+    for (ls = lacf->streams[ngx_hash_key(path, path_len) % lacf->nbuckets];
          ls; ls = ls->next) 
     {
         len = ngx_strlen(ls->name);
-        if (name.len != len || ngx_strncmp(name.data, ls->name, name.len)) {
+        if (path_len != len || ngx_strncmp(path, ls->name, path_len)) {
             continue;
         }
 
@@ -391,25 +399,39 @@ ngx_rtmp_control_walk(ngx_http_request_t *r, ngx_rtmp_control_handler_t h)
     ngx_rtmp_core_main_conf_t  *cmcf = ngx_rtmp_core_main_conf;
 
     ngx_str_t                   srv;
-    ngx_uint_t                  sn, n;
+    ngx_uint_t                  n, k;
     const char                 *msg;
     ngx_rtmp_session_t        **s;
     ngx_rtmp_control_ctx_t     *ctx;
-    ngx_rtmp_core_srv_conf_t  **pcscf;
+    ngx_rtmp_core_srv_conf_t  **pcscf, *cscf = NULL;
+    ngx_rtmp_server_name_t *names = NULL;
 
-    sn = 0;
-    if (ngx_http_arg(r, (u_char *) "srv", sizeof("srv") - 1, &srv) == NGX_OK) {
-        sn = ngx_atoi(srv.data, srv.len);
-    }
-
-    if (sn >= cmcf->servers.nelts) {
-        return "Server index out of range";
+    if (ngx_http_arg(r, (u_char *) "srv", sizeof("srv") - 1, &srv) != NGX_OK) {
+        return "With no vhost information";
     }
 
     pcscf  = cmcf->servers.elts;
-    pcscf += sn;
 
-    msg = ngx_rtmp_control_walk_server(r, *pcscf);
+    for (n = 0; n < cmcf->servers.nelts; n++) {
+
+        names = pcscf[n]->server_names.elts;
+        for (k = 0; k < pcscf[n]->server_names.nelts; k++) {
+                
+            if (0 == ngx_strncasecmp(srv.data, names[k].name.data, srv.len)) {
+                cscf = pcscf[n];
+                break;
+            }
+        }
+        if (cscf) {
+            break;
+        }
+    }
+
+    if (!cscf) {
+        return "No vhost match the server";
+    }
+
+    msg = ngx_rtmp_control_walk_server(r, cscf);
     if (msg != NGX_CONF_OK) {
         return msg;
     }

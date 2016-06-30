@@ -12,6 +12,8 @@
 
 
 static void *ngx_rtmp_core_create_main_conf(ngx_conf_t *cf);
+static char *ngx_rtmp_core_init_main_conf(ngx_conf_t *cf, void *conf);
+
 static void *ngx_rtmp_core_create_srv_conf(ngx_conf_t *cf);
 static char *ngx_rtmp_core_merge_srv_conf(ngx_conf_t *cf, void *parent,
     void *child);
@@ -25,6 +27,7 @@ static char *ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd,
 static char *ngx_rtmp_core_application(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 
+static char *ngx_rtmp_core_server_name(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
 ngx_rtmp_core_main_conf_t      *ngx_rtmp_core_main_conf;
 
@@ -51,6 +54,26 @@ static ngx_command_t  ngx_rtmp_core_commands[] = {
       0,
       NULL },
 
+    { ngx_string("server_name"),
+      NGX_RTMP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_rtmp_core_server_name,
+      NGX_RTMP_SRV_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("server_names_hash_max_size"),
+        NGX_RTMP_MAIN_CONF|NGX_CONF_TAKE1,
+        ngx_conf_set_num_slot,
+        NGX_RTMP_MAIN_CONF_OFFSET,
+        offsetof(ngx_rtmp_core_main_conf_t, server_names_hash_max_size),
+        NULL },
+
+    { ngx_string("server_names_hash_bucket_size"),
+      NGX_RTMP_MAIN_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_RTMP_MAIN_CONF_OFFSET,
+      offsetof(ngx_rtmp_core_main_conf_t, server_names_hash_bucket_size),
+      NULL },
     { ngx_string("application"),
       NGX_RTMP_SRV_CONF|NGX_CONF_BLOCK|NGX_CONF_TAKE1,
       ngx_rtmp_core_application,
@@ -165,7 +188,7 @@ static ngx_rtmp_module_t  ngx_rtmp_core_module_ctx = {
     NULL,                                   /* preconfiguration */
     NULL,                                   /* postconfiguration */
     ngx_rtmp_core_create_main_conf,         /* create main configuration */
-    NULL,                                   /* init main configuration */
+    ngx_rtmp_core_init_main_conf,           /* init main configuration */
     ngx_rtmp_core_create_srv_conf,          /* create server configuration */
     ngx_rtmp_core_merge_srv_conf,           /* merge server configuration */
     ngx_rtmp_core_create_app_conf,          /* create app configuration */
@@ -214,8 +237,32 @@ ngx_rtmp_core_create_main_conf(ngx_conf_t *cf)
         return NULL;
     }
 
+    cmcf->server_names_hash_max_size = NGX_CONF_UNSET_UINT;
+    cmcf->server_names_hash_bucket_size = NGX_CONF_UNSET_UINT;
     return cmcf;
 }
+
+static char *
+ngx_rtmp_core_init_main_conf(ngx_conf_t *cf, void *conf)
+{
+    ngx_rtmp_core_main_conf_t *cmcf = conf;
+
+    ngx_conf_init_uint_value(cmcf->server_names_hash_max_size, 512);
+    ngx_conf_init_uint_value(cmcf->server_names_hash_bucket_size, ngx_cacheline_size);
+
+    cmcf->server_names_hash_bucket_size =
+            ngx_align(cmcf->server_names_hash_bucket_size, ngx_cacheline_size);
+
+
+    //ngx_conf_init_uint_value(cmcf->variables_hash_max_size, 1024);
+    //ngx_conf_init_uint_value(cmcf->variables_hash_bucket_size, 64);
+
+    ///cmcf->variables_hash_bucket_size =
+    //           ngx_align(cmcf->variables_hash_bucket_size, ngx_cacheline_size);
+
+    return NGX_CONF_OK;
+}
+
 
 
 static void *
@@ -230,6 +277,20 @@ ngx_rtmp_core_create_srv_conf(ngx_conf_t *cf)
 
     if (ngx_array_init(&conf->applications, cf->pool, 4,
                        sizeof(ngx_rtmp_core_app_conf_t *))
+        != NGX_OK)
+    {
+        return NULL;
+    }
+
+    if (ngx_array_init(&conf->server_names, cf->temp_pool, 4,
+                       sizeof(ngx_rtmp_server_name_t))
+        != NGX_OK)
+    {
+        return NULL;
+    }
+
+    if (ngx_array_init(&conf->addr_array, cf->pool, 16,
+                      sizeof(ngx_rtmp_sockaddr_t))
         != NGX_OK)
     {
         return NULL;
@@ -259,6 +320,9 @@ ngx_rtmp_core_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
 {
     ngx_rtmp_core_srv_conf_t *prev = parent;
     ngx_rtmp_core_srv_conf_t *conf = child;
+    ngx_rtmp_server_name_t  *sn, *sni;
+    ngx_array_t server_names_tmp;
+    ngx_uint_t n = 0;
 
     ngx_conf_merge_msec_value(conf->timeout, prev->timeout, 60000);
     ngx_conf_merge_msec_value(conf->ping, prev->ping, 60000);
@@ -270,14 +334,25 @@ ngx_rtmp_core_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_uint_value(conf->ack_window, prev->ack_window, 5000000);
     ngx_conf_merge_size_value(conf->max_message, prev->max_message,
             1 * 1024 * 1024);
-    ngx_conf_merge_size_value(conf->out_queue, prev->out_queue, 256);
-    ngx_conf_merge_size_value(conf->out_cork, prev->out_cork,
-            conf->out_queue / 8);
+    ngx_conf_merge_size_value(conf->out_queue, prev->out_queue, 2048);
+    ngx_conf_merge_size_value(conf->out_cork, prev->out_cork, 256);
     ngx_conf_merge_value(conf->play_time_fix, prev->play_time_fix, 1);
     ngx_conf_merge_value(conf->publish_time_fix, prev->publish_time_fix, 1);
     ngx_conf_merge_msec_value(conf->buflen, prev->buflen, 1000);
     ngx_conf_merge_value(conf->busy, prev->busy, 0);
 
+    if (conf->server_names.nelts == 0) {
+        sn = ngx_array_push(&conf->server_names);
+        sn->server = conf;
+        ngx_str_set(&sn->name, "");
+    }
+    
+    sn = conf->server_names.elts;
+    conf->server_name.len = sn[0].name.len;
+    conf->server_name.data = ngx_pstrdup(cf->pool, &sn[0].name);
+    if (conf->server_name.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
     if (prev->pool == NULL) {
         prev->pool = ngx_create_pool(4096, &cf->cycle->new_log);
         if (prev->pool == NULL) {
@@ -286,6 +361,51 @@ ngx_rtmp_core_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
     }
 
     conf->pool = prev->pool;
+
+    /* copy server_names from temp_pool to pool */
+    if (ngx_array_init(&server_names_tmp, cf->temp_pool, 4,
+                       sizeof(ngx_rtmp_server_name_t))
+        != NGX_OK)
+    {
+        return NULL;
+    }
+    
+    sn = conf->server_names.elts;
+    for (n = 0; n < conf->server_names.nelts; n++) {
+        sni = ngx_array_push(&server_names_tmp);
+        sni->server = sn[n].server;
+        if (sn[n].name.len > 0) {
+            
+            sni->name.len = sn[n].name.len;
+            sni->name.data = ngx_palloc(conf->pool, sni->name.len);
+            ngx_memcpy(sni->name.data, sn[n].name.data, sni->name.len);
+        }
+        else {
+            ngx_str_set(&sni->name, "");
+        }
+    }
+
+    if (ngx_array_init(&conf->server_names, conf->pool, 4,
+                       sizeof(ngx_rtmp_server_name_t))
+        != NGX_OK)
+    {
+        return NULL;
+    }
+
+    sn = server_names_tmp.elts;
+    for (n = 0; n < server_names_tmp.nelts; n++) {
+        sni = ngx_array_push(&conf->server_names);
+        sni->server = sn[n].server;
+        if (sn[n].name.len > 0) {
+            
+            sni->name.len = sn[n].name.len;
+            sni->name.data = ngx_palloc(conf->pool, sni->name.len);
+            ngx_memcpy(sni->name.data, sn[n].name.data, sni->name.len);
+        }
+        else {
+            ngx_str_set(&sni->name, "");
+        }
+    }
 
     return NGX_CONF_OK;
 }
@@ -336,6 +456,8 @@ ngx_rtmp_core_server(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_rtmp_conf_ctx_t        *ctx, *rtmp_ctx;
     ngx_rtmp_core_srv_conf_t   *cscf, **cscfp;
     ngx_rtmp_core_main_conf_t  *cmcf;
+    ngx_rtmp_listen_t           lsopt;
+    struct sockaddr_in         *sin;
 
     ctx = ngx_pcalloc(cf->pool, sizeof(ngx_rtmp_conf_ctx_t));
     if (ctx == NULL) {
@@ -408,6 +530,26 @@ ngx_rtmp_core_server(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     *cf = pcf;
 
+     if (rv == NGX_CONF_OK && !cscf->listen) {
+        ngx_memzero(&lsopt, sizeof(ngx_rtmp_listen_t));
+
+        sin = &lsopt.u.sockaddr_in;
+
+        sin->sin_family = AF_INET;
+        sin->sin_port = htons(1935);
+        sin->sin_addr.s_addr = INADDR_ANY;
+
+        lsopt.socklen = sizeof(struct sockaddr_in);
+
+        lsopt.wildcard = 1;
+
+        (void) ngx_sock_ntop(&lsopt.u.sockaddr, lsopt.socklen, lsopt.sockaddr,
+                             NGX_SOCKADDR_STRLEN, 1);
+
+        if (ngx_rtmp_add_listen(cf, cscf, &lsopt) != NGX_OK) {
+            return NGX_CONF_ERROR;
+        }
+    }
     return rv;
 }
 
@@ -423,6 +565,7 @@ ngx_rtmp_core_application(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_rtmp_conf_ctx_t        *ctx, *pctx;
     ngx_rtmp_core_srv_conf_t   *cscf;
     ngx_rtmp_core_app_conf_t   *cacf, **cacfp;
+    ngx_uint_t                  n;
 
     ctx = ngx_pcalloc(cf->pool, sizeof(ngx_rtmp_conf_ctx_t));
     if (ctx == NULL) {
@@ -462,6 +605,17 @@ ngx_rtmp_core_application(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     cacf->name = value[1];
     cscf = pctx->srv_conf[ngx_rtmp_core_module.ctx_index];
 
+    cacfp = cscf->applications.elts;
+    for (n = 0; n < cscf->applications.nelts; ++n, ++cacfp) {
+        if ((*cacfp)->name.len == cacf->name.len &&
+            ngx_strncmp((*cacfp)->name.data, cacf->name.data, cacf->name.len) == 0)
+        {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                          "duplicate application \"%V\"", &cacf->name);
+            return NGX_CONF_ERROR;
+        }
+    }
+
     cacfp = ngx_array_push(&cscf->applications);
     if (cacfp == NULL) {
         return NGX_CONF_ERROR;
@@ -484,18 +638,23 @@ ngx_rtmp_core_application(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 static char *
 ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
+    ngx_rtmp_core_srv_conf_t *cscf = conf;
+
     size_t                      len, off;
     in_port_t                   port;
+    ngx_rtmp_sockaddr_t        *addr; 
     ngx_str_t                  *value;
     ngx_url_t                   u;
     ngx_uint_t                  i, m;
     struct sockaddr            *sa;
-    ngx_rtmp_listen_t          *ls;
+    ngx_rtmp_listen_t          *lsopt;
     struct sockaddr_in         *sin;
     ngx_rtmp_core_main_conf_t  *cmcf;
 #if (NGX_HAVE_INET6)
     struct sockaddr_in6        *sin6;
 #endif
+
+    cscf->listen = 1;
 
     value = cf->args->elts;
 
@@ -503,7 +662,9 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     u.url = value[1];
     u.listen = 1;
+    u.default_port = 1935;
 
+    //after parse, u.port is initialized
     if (ngx_parse_url(cf->pool, &u) != NGX_OK) {
         if (u.err) {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
@@ -513,14 +674,21 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
         return NGX_CONF_ERROR;
     }
+    
+    if (cscf->port == 0) {
+        cscf->port = u.port;
+    }
+            
+    addr = ngx_array_push(&cscf->addr_array);
+    ngx_memcpy(addr->sockaddr, u.sockaddr, u.socklen);
 
     cmcf = ngx_rtmp_conf_get_module_main_conf(cf, ngx_rtmp_core_module);
 
-    ls = cmcf->listen.elts;
+    lsopt = cmcf->listen.elts;
 
     for (i = 0; i < cmcf->listen.nelts; i++) {
 
-        sa = (struct sockaddr *) ls[i].sockaddr;
+        sa = (struct sockaddr *) lsopt[i].sockaddr;
 
         if (sa->sa_family != u.family) {
             continue;
@@ -545,7 +713,7 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             break;
         }
 
-        if (ngx_memcmp(ls[i].sockaddr + off, u.sockaddr + off, len) != 0) {
+        if (ngx_memcmp(lsopt[i].sockaddr + off, u.sockaddr + off, len) != 0) {
             continue;
         }
 
@@ -558,18 +726,21 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_ERROR;
     }
 
-    ls = ngx_array_push(&cmcf->listen);
-    if (ls == NULL) {
+    lsopt = ngx_array_push(&cmcf->listen);
+    if (lsopt == NULL) {
         return NGX_CONF_ERROR;
     }
 
-    ngx_memzero(ls, sizeof(ngx_rtmp_listen_t));
+    ngx_memzero(lsopt, sizeof(ngx_rtmp_listen_t));
 
-    ngx_memcpy(ls->sockaddr, u.sockaddr, u.socklen);
+    ngx_memcpy(&lsopt->u.sockaddr, u.sockaddr, u.socklen);
 
-    ls->socklen = u.socklen;
-    ls->wildcard = u.wildcard;
-    ls->ctx = cf->ctx;
+    lsopt->socklen = u.socklen;
+    lsopt->wildcard = u.wildcard;
+    lsopt->ctx = cf->ctx;
+
+    (void) ngx_sock_ntop(&lsopt->u.sockaddr, lsopt->socklen, lsopt->sockaddr,
+                         NGX_SOCKADDR_STRLEN, 1);
 
     for (m = 0; ngx_modules[m]; m++) {
         if (ngx_modules[m]->type != NGX_RTMP_MODULE) {
@@ -579,8 +750,15 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     for (i = 2; i < cf->args->nelts; i++) {
 
+        if (ngx_strcmp(value[i].data, "default_server") == 0
+            || ngx_strcmp(value[i].data, "default") == 0)
+        {
+            lsopt->default_server = 1;
+            cscf->default_flag = 1;
+            continue;
+        }
         if (ngx_strcmp(value[i].data, "bind") == 0) {
-            ls->bind = 1;
+            lsopt->bind = 1;
             continue;
         }
 
@@ -589,15 +767,15 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             struct sockaddr  *sa;
             u_char            buf[NGX_SOCKADDR_STRLEN];
 
-            sa = (struct sockaddr *) ls->sockaddr;
+            sa = (struct sockaddr *) lsopt->sockaddr;
 
             if (sa->sa_family == AF_INET6) {
 
                 if (ngx_strcmp(&value[i].data[10], "n") == 0) {
-                    ls->ipv6only = 1;
+                    lsopt->ipv6only = 1;
 
                 } else if (ngx_strcmp(&value[i].data[10], "ff") == 0) {
-                    ls->ipv6only = 0;
+                    lsopt->ipv6only = 0;
 
                 } else {
                     ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
@@ -606,12 +784,12 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                     return NGX_CONF_ERROR;
                 }
 
-                ls->bind = 1;
+                lsopt->bind = 1;
 
             } else {
                 len = ngx_sock_ntop(sa,
 #if (nginx_version >= 1005003)
-                                    ls->socklen,
+                                    lsopt->socklen,
 #endif
                                     buf, NGX_SOCKADDR_STRLEN, 1);
 
@@ -632,10 +810,10 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         if (ngx_strncmp(value[i].data, "so_keepalive=", 13) == 0) {
 
             if (ngx_strcmp(&value[i].data[13], "on") == 0) {
-                ls->so_keepalive = 1;
+                lsopt->so_keepalive = 1;
 
             } else if (ngx_strcmp(&value[i].data[13], "off") == 0) {
-                ls->so_keepalive = 2;
+                lsopt->so_keepalive = 2;
 
             } else {
 
@@ -654,8 +832,8 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                 if (p > s.data) {
                     s.len = p - s.data;
 
-                    ls->tcp_keepidle = ngx_parse_time(&s, 1);
-                    if (ls->tcp_keepidle == (time_t) NGX_ERROR) {
+                    lsopt->tcp_keepidle = ngx_parse_time(&s, 1);
+                    if (lsopt->tcp_keepidle == (time_t) NGX_ERROR) {
                         goto invalid_so_keepalive;
                     }
                 }
@@ -670,8 +848,8 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                 if (p > s.data) {
                     s.len = p - s.data;
 
-                    ls->tcp_keepintvl = ngx_parse_time(&s, 1);
-                    if (ls->tcp_keepintvl == (time_t) NGX_ERROR) {
+                    lsopt->tcp_keepintvl = ngx_parse_time(&s, 1);
+                    if (lsopt->tcp_keepintvl == (time_t) NGX_ERROR) {
                         goto invalid_so_keepalive;
                     }
                 }
@@ -681,19 +859,19 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                 if (s.data < end) {
                     s.len = end - s.data;
 
-                    ls->tcp_keepcnt = ngx_atoi(s.data, s.len);
-                    if (ls->tcp_keepcnt == NGX_ERROR) {
+                    lsopt->tcp_keepcnt = ngx_atoi(s.data, s.len);
+                    if (lsopt->tcp_keepcnt == NGX_ERROR) {
                         goto invalid_so_keepalive;
                     }
                 }
 
-                if (ls->tcp_keepidle == 0 && ls->tcp_keepintvl == 0
-                    && ls->tcp_keepcnt == 0)
+                if (lsopt->tcp_keepidle == 0 && lsopt->tcp_keepintvl == 0
+                    && lsopt->tcp_keepcnt == 0)
                 {
                     goto invalid_so_keepalive;
                 }
 
-                ls->so_keepalive = 1;
+                lsopt->so_keepalive = 1;
 
 #else
 
@@ -705,7 +883,7 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 #endif
             }
 
-            ls->bind = 1;
+            lsopt->bind = 1;
 
             continue;
 
@@ -720,12 +898,72 @@ ngx_rtmp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         }
 
         if (ngx_strcmp(value[i].data, "proxy_protocol") == 0) {
-            ls->proxy_protocol = 1;
+            lsopt->proxy_protocol = 1;
             continue;
         }
 
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "the invalid \"%V\" parameter", &value[i]);
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_rtmp_add_listen(cf, cscf, lsopt) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+    
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_rtmp_core_server_name(ngx_conf_t *cf, ngx_command_t *cmd, void *conf){
+    ngx_rtmp_core_srv_conf_t *cscf = conf;
+    u_char                   ch;
+    ngx_str_t               *value;
+    ngx_uint_t               i;
+    ngx_rtmp_server_name_t  *sn;
+
+    value = cf->args->elts;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+
+        ch = value[i].data[0];
+
+        if ((ch == '*' && (value[i].len < 3 || value[i].data[1] != '.'))
+            || (ch == '.' && value[i].len < 2))
+        {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "server name \"%V\" is invalid", &value[i]);
+            return NGX_CONF_ERROR;
+        }
+
+        if (ngx_strchr(value[i].data, '/')) {
+            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                               "server name \"%V\" has suspicious symbols",
+                               &value[i]);
+        }
+
+        sn = ngx_array_push(&cscf->server_names);
+        if (sn == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        sn->server = cscf;
+
+        if (ngx_strcasecmp(value[i].data, (u_char *) "$hostname") == 0) {
+            sn->name = cf->cycle->hostname;
+
+        } else {
+            sn->name = value[i];
+        }
+        
+        if (value[i].data[0] != '~') {
+            ngx_strlow(sn->name.data, sn->name.data, sn->name.len);
+            continue;
+        }
+
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "Can`t using regex \"%V\"", &value[i]);
+
         return NGX_CONF_ERROR;
     }
 

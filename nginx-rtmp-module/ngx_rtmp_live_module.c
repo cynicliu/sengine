@@ -489,6 +489,7 @@ ngx_rtmp_live_join(ngx_rtmp_session_t *s, u_char *name, unsigned publisher)
     ngx_rtmp_live_ctx_t            *ctx;
     ngx_rtmp_live_stream_t        **stream;
     ngx_rtmp_live_app_conf_t       *lacf;
+    u_char                          path[NGX_RTMP_MAX_URL];
 
     lacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_live_module);
     if (lacf == NULL) {
@@ -513,8 +514,9 @@ ngx_rtmp_live_join(ngx_rtmp_session_t *s, u_char *name, unsigned publisher)
 
     ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                    "live: join '%s'", name);
-
-    stream = ngx_rtmp_live_get_stream(s, name, publisher || lacf->idle_streams);
+    
+    *ngx_sprintf(path, "%V/%s", &s->app, name) = 0;
+    stream = ngx_rtmp_live_get_stream(s, path, publisher || lacf->idle_streams);
 
     if (stream == NULL ||
         !(publisher || (*stream)->publishing || lacf->idle_streams))
@@ -537,7 +539,7 @@ ngx_rtmp_live_join(ngx_rtmp_session_t *s, u_char *name, unsigned publisher)
 
             ngx_rtmp_send_status(s, "NetStream.Publish.BadName", "error",
                                  "Already publishing");
-
+            
             return;
         }
 

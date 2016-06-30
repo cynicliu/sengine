@@ -736,7 +736,7 @@ ngx_rtmp_send_message(ngx_rtmp_session_t *s, ngx_chain_t *out,
             "RTMP send nmsg=%ui, priority=%ui #%ui",
             nmsg, priority, s->out_last);
 
-    if (priority && s->out_buffer && nmsg < s->out_cork) {
+    if (priority && s->out_buffer && nmsg < (ngx_uint_t)s->out_cork) {
         return NGX_OK;
     }
 

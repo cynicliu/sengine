@@ -59,6 +59,7 @@ struct ngx_peer_connection_s {
     int                              rcvbuf;
 
     ngx_log_t                       *log;
+    ngx_pool_t                      *pool;
 
     unsigned                         cached:1;
 

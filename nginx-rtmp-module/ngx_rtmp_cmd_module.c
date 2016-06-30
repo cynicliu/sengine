@@ -6,8 +6,10 @@
 
 #include <ngx_config.h>
 #include <ngx_core.h>
+#include "ngx_rtmp.h"
 #include "ngx_rtmp_cmd_module.h"
 #include "ngx_rtmp_streams.h"
+#include "ngx_rtmp_parse.h"
 
 
 #define NGX_RTMP_FMS_VERSION        "FMS/3,0,1,123"
@@ -43,6 +45,10 @@ static ngx_int_t ngx_rtmp_cmd_recorded(ngx_rtmp_session_t *s,
        ngx_rtmp_recorded_t *v);
 static ngx_int_t ngx_rtmp_cmd_set_buflen(ngx_rtmp_session_t *s,
        ngx_rtmp_set_buflen_t *v);
+static ngx_int_t ngx_rtmp_set_virtual_server(ngx_rtmp_session_t *s);
+static ngx_int_t ngx_rtmp_find_virtual_server(ngx_connection_t *c,
+       ngx_rtmp_virtual_names_t *virtual_names, ngx_str_t *host,
+       ngx_rtmp_session_t *s, ngx_rtmp_core_srv_conf_t **cscfp);
 
 
 ngx_rtmp_connect_pt         ngx_rtmp_connect;
@@ -64,7 +70,6 @@ ngx_rtmp_set_buflen_pt      ngx_rtmp_set_buflen;
 
 
 static ngx_int_t ngx_rtmp_cmd_postconfiguration(ngx_conf_t *cf);
-
 
 static ngx_rtmp_module_t  ngx_rtmp_cmd_module_ctx = {
     NULL,                                   /* preconfiguration */
@@ -187,6 +192,16 @@ ngx_rtmp_cmd_connect_init(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
             v.app, v.args, v.flashver, v.swf_url, v.tc_url, v.page_url,
             (uint32_t)v.acodecs, (uint32_t)v.vcodecs,
             (ngx_int_t)v.object_encoding);
+    
+    s->page_url.len = ngx_strlen(v.page_url);
+    s->page_url.data = ngx_palloc(s->connection->pool, s->page_url.len);
+    ngx_memcpy(s->page_url.data, v.page_url, s->page_url.len);
+    
+	//check vhost_name
+	//extract cname from v.tc_url, tc_url is like "rtmp://hostname:port/vod
+    if (NGX_OK == ngx_rtmp_parse_tcurl(s, &v)){
+        ngx_rtmp_set_virtual_server(s);
+    }
 
     return ngx_rtmp_connect(s, &v);
 }
@@ -853,4 +868,135 @@ ngx_rtmp_cmd_postconfiguration(ngx_conf_t *cf)
     ngx_rtmp_set_buflen = ngx_rtmp_cmd_set_buflen;
 
     return NGX_OK;
+}
+
+static ngx_int_t
+ngx_rtmp_set_virtual_server(ngx_rtmp_session_t *s)
+{
+    ngx_int_t                  rc = NGX_ERROR;
+    ngx_rtmp_core_srv_conf_t  *cscf = NULL;
+    ngx_rtmp_sockaddr_t       *addrs;
+    struct sockaddr           *sa;
+    struct sockaddr_in        *sin;
+#if (NGX_HAVE_INET6)
+    struct sockaddr_in6       *sin6;
+#endif
+    in_port_t                  p = htons(s->lport);
+    in_port_t                  port;
+
+    ngx_rtmp_core_main_conf_t *cmcf = ngx_rtmp_core_main_conf;
+
+    if (s->auto_pushed) {
+
+        ngx_uint_t i = 0;
+        ngx_uint_t j = 0;
+        ngx_uint_t k = 0;
+        ngx_rtmp_core_srv_conf_t  **pcscf;
+        ngx_rtmp_server_name_t *names = NULL;
+        pcscf  = cmcf->servers.elts;
+        for (i = 0; i < cmcf->servers.nelts; i++) {
+
+            names = pcscf[i]->server_names.elts;
+            for (j = 0; j < pcscf[i]->server_names.nelts; j++) {
+                if (names[j].name.len == s->host_in.len &&
+                                    0 == ngx_strncasecmp(s->host_in.data, names[j].name.data, s->host_in.len)) {
+
+                    addrs = pcscf[i]->addr_array.elts;
+                    for(k = 0; k < pcscf[i]->addr_array.nelts; k++) {
+                        sa = (struct sockaddr *)addrs[k].sockaddr;
+                        switch (sa->sa_family) {
+#if (NGX_HAVE_INET6)
+                            case AF_INET6:
+                                sin6 = (struct sockaddr_in6 *) sa;
+                                port = sin6->sin6_port;
+                                break;
+#endif
+                            default: /* AF_INET */
+                                sin = (struct sockaddr_in *) sa;
+                                port = sin->sin_port;
+                            break;
+                        }
+                        if(port == p){
+                            cscf = pcscf[i];
+                            rc = NGX_OK;
+                            break;
+                        }
+                    }
+
+                    if( cscf) {
+                        break;
+                    }
+                }
+
+            }
+            if (cscf) {
+                break;
+            }
+        }
+    }
+    else {
+        rc = ngx_rtmp_find_virtual_server(s->connection,
+                                      s->addr_conf->virtual_names,
+                                      &s->host_in, s, &cscf);
+    }
+
+    if (rc == NGX_ERROR){
+        ngx_rtmp_finalize_session(s);
+        return NGX_ERROR;
+    }
+
+    if (rc == NGX_DECLINED) {
+        
+        /* default_server is the first server if no default/default_server configured in this listen addr
+           only allow connect to server with default/default_server explicitly when no host field */
+        if (s->addr_conf->default_server && s->addr_conf->default_server->default_flag) {
+            cscf = s->addr_conf->default_server;
+        }
+        else {
+            ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                          "client attempted to request the unknown server name");
+            ngx_rtmp_finalize_session(s);
+            return NGX_ERROR;
+        }
+    }
+
+    if( s->auto_pushed){
+        u_char buf[20] = {0};
+        ngx_snprintf(buf, sizeof(buf), "0.0.0.0:%ui", s->lport);
+        size_t len = ngx_strlen(buf);
+        ngx_str_t* sn = ngx_pcalloc(s->connection->pool, sizeof(ngx_str_t) + len);
+        if(sn){
+            sn->len = len;
+            sn->data = ((u_char*)sn) + sizeof(ngx_str_t);
+            ngx_memcpy(sn->data, buf, len);
+            s->addr_text = sn;
+        }
+    }
+
+    s->app_conf = cscf->ctx->app_conf;
+    s->srv_conf = cscf->ctx->srv_conf;
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_rtmp_find_virtual_server(ngx_connection_t *c,
+    ngx_rtmp_virtual_names_t *virtual_names, ngx_str_t *host,
+    ngx_rtmp_session_t *s, ngx_rtmp_core_srv_conf_t **cscfp)
+{
+    ngx_rtmp_core_srv_conf_t  *cscf;
+
+    if (virtual_names == NULL) {
+        return NGX_DECLINED;
+    }
+
+    cscf = ngx_hash_find_combined(&virtual_names->names,
+                                  ngx_hash_key(host->data, host->len),
+                                  host->data, host->len);
+
+    if (cscf) {
+        *cscfp = cscf;
+        return NGX_OK;
+    }
+
+	return NGX_DECLINED;
 }

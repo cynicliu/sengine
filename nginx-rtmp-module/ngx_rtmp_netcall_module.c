@@ -180,6 +180,7 @@ ngx_rtmp_netcall_create(ngx_rtmp_session_t *s, ngx_rtmp_netcall_init_t *ci)
     ngx_connection_t               *c, *cc;
     ngx_pool_t                     *pool;
     ngx_int_t                       rc;
+    ngx_log_t                      *log;
 
     pool = NULL;
     c = s->connection;
@@ -239,10 +240,17 @@ ngx_rtmp_netcall_create(ngx_rtmp_session_t *s, ngx_rtmp_netcall_init_t *ci)
         cs->detached = 1;
     }
 
-    pc->log = nscf->log;
+    log = ngx_palloc(pool, sizeof(ngx_log_t));
+    if (log == NULL) {
+        goto error;
+    }
+
+    *log = *nscf->log;
+    pc->log = log;
     pc->get = ngx_rtmp_netcall_get_peer;
     pc->free = ngx_rtmp_netcall_free_peer;
     pc->data = cs;
+    pc->pool = pool;
 
     /* connect */
     rc = ngx_event_connect_peer(pc);

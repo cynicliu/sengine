@@ -342,9 +342,15 @@ ngx_rtmp_notify_create_request(ngx_rtmp_session_t *s, ngx_pool_t *pool,
         bl = cl;
     }
 
-    return ngx_rtmp_netcall_http_format_request(nacf->method, &url->host,
+    if (s->host_in.len > 0) {
+
+        return ngx_rtmp_netcall_http_format_request(nacf->method, &s->host_in,
                                                 &url->uri, al, bl, pool,
                                                 &ngx_rtmp_notify_urlencoded);
+    }
+    return ngx_rtmp_netcall_http_format_request(nacf->method, &url->host,
+                                                &url->uri, al, bl, pool,
+                                                &ngx_rtmp_notify_urlencoded);;
 }
 
 

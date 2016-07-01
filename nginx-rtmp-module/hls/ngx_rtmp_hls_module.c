@@ -1197,7 +1197,7 @@ ngx_rtmp_hls_ensure_directory(ngx_rtmp_session_t *s, ngx_str_t *path)
 
         /* ENOENT */
 
-        if (ngx_create_dir(zpath, NGX_RTMP_HLS_DIR_ACCESS) == NGX_FILE_ERROR) {
+        if (ngx_create_full_path(zpath, NGX_RTMP_HLS_DIR_ACCESS) == NGX_FILE_ERROR) {
             ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
                           "hls: " ngx_create_dir_n " failed on '%V'", path);
             return NGX_ERROR;
@@ -1216,10 +1216,6 @@ ngx_rtmp_hls_ensure_directory(ngx_rtmp_session_t *s, ngx_str_t *path)
 
         ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                        "hls: directory '%V' exists", path);
-    }
-
-    if (!hacf->nested) {
-        return NGX_OK;
     }
 
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
@@ -1259,7 +1255,7 @@ ngx_rtmp_hls_ensure_directory(ngx_rtmp_session_t *s, ngx_str_t *path)
 
     /* NGX_ENOENT */
 
-    if (ngx_create_dir(zpath, NGX_RTMP_HLS_DIR_ACCESS) == NGX_FILE_ERROR) {
+    if (ngx_create_full_path(zpath, NGX_RTMP_HLS_DIR_ACCESS) == NGX_FILE_ERROR) {
         ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
                       "hls: " ngx_create_dir_n " failed on '%s'", zpath);
         return NGX_ERROR;
@@ -1283,6 +1279,7 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     size_t                          len;
     ngx_rtmp_hls_variant_t         *var;
     ngx_uint_t                      n;
+    ngx_str_t                       path;
 
     hacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_hls_module);
     if (hacf == NULL || !hacf->hls || hacf->path.len == 0) {
@@ -1343,7 +1340,7 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
 
     *ngx_cpymem(ctx->name.data, v->name, ctx->name.len) = 0;
 
-    len = hacf->path.len + 1 + ctx->name.len + sizeof(".m3u8");
+    len = hacf->path.len + 1 + s->host_in.len + 1 + s->app.len + 1 + ctx->name.len + sizeof(".m3u8");
     if (hacf->nested) {
         len += sizeof("/index") - 1;
     }
@@ -1354,6 +1351,26 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     if (p[-1] != '/') {
         *p++ = '/';
     }
+
+    p = ngx_cpymem(p, s->host_in.data, s->host_in.len);
+
+    if (p[-1] != '/') {
+        *p++ = '/';
+    }
+
+    p = ngx_cpymem(p, s->app.data, s->app.len);
+
+    if (p[-1] != '/') {
+        *p++ = '/';
+    }
+
+    path.data = ctx->playlist.data;
+    path.len = p - ctx->playlist.data;
+
+    /*
+     * path holds the dir path include hacf->path + vhost + app
+     * */
+    ngx_rtmp_hls_ensure_directory(s, &path);
 
     p = ngx_cpymem(p, ctx->name.data, ctx->name.len);
 
@@ -1370,6 +1387,12 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
 
     ngx_memcpy(ctx->stream.data, ctx->playlist.data, ctx->stream.len - 1);
     ctx->stream.data[ctx->stream.len - 1] = (hacf->nested ? '/' : '-');
+
+    if (hacf->nested) {
+        path.data = ctx->playlist.data;
+        path.len = p - ctx->playlist.data;
+        ngx_rtmp_hls_ensure_directory(s, &path);
+    }
 
     /* varint playlist path */
 
@@ -1440,7 +1463,7 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     /* key path */
 
     if (hacf->keys) {
-        len = hacf->key_path.len + 1 + ctx->name.len + 1 + NGX_INT64_LEN
+        len = hacf->key_path.len + 1 + s->host_in.len + 1 + s->app.len + 1 + ctx->name.len + 1 + NGX_INT64_LEN
               + sizeof(".key");
 
         ctx->keyfile.data = ngx_palloc(s->connection->pool, len);
@@ -1455,8 +1478,34 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
             *p++ = '/';
         }
 
+		p = ngx_cpymem(p, s->host_in.data, s->host_in.len);
+
+	    if (p[-1] != '/') {
+	        *p++ = '/';
+	    }
+
+	    p = ngx_cpymem(p, s->app.data, s->app.len);
+
+	    if (p[-1] != '/') {
+	        *p++ = '/';
+	    }
+
+		path.data = ctx->keyfile.data;
+	    path.len = p - ctx->keyfile.data;
+
+	    /*
+	     * path holds the dir path include hacf->key_path + vhost + app
+	     * */
+	    ngx_rtmp_hls_ensure_directory(s, &path);
+
         p = ngx_cpymem(p, ctx->name.data, ctx->name.len);
         *p++ = (hacf->nested ? '/' : '-');
+
+		if (hacf->nested) {
+            path.data = ctx->keyfile.data;
+            path.len = p - ctx->keyfile.data;
+            ngx_rtmp_hls_ensure_directory(s, &path);
+        }
 
         ctx->keyfile.len = p - ctx->keyfile.data;
     }

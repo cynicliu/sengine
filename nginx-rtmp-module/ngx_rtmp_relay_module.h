@@ -21,10 +21,14 @@ typedef struct {
     ngx_str_t                       page_url;
     ngx_str_t                       swf_url;
     ngx_str_t                       flash_ver;
+    ngx_str_t                       user_agent;
     ngx_str_t                       play_path;
+    ngx_str_t                       vhost;
     ngx_int_t                       live;
     ngx_int_t                       start;
     ngx_int_t                       stop;
+    ngx_flag_t                      push_target;
+    ngx_flag_t                      local;
 
     void                           *tag;     /* usually module reference */
     void                           *data;    /* module-specific data */
@@ -48,7 +52,9 @@ struct ngx_rtmp_relay_ctx_s {
     ngx_str_t                       page_url;
     ngx_str_t                       swf_url;
     ngx_str_t                       flash_ver;
+    ngx_str_t                       user_agent;
     ngx_str_t                       play_path;
+    ngx_str_t                       vhost;
     ngx_int_t                       live;
     ngx_int_t                       start;
     ngx_int_t                       stop;

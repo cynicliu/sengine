@@ -12,6 +12,8 @@
 #include "ngx_rtmp_codec_module.h"
 #include "ngx_rtmp_record_module.h"
 
+#define NGX_RTMP_RECORD_DIR_ACCESS         0744
+
 
 ngx_rtmp_record_done_pt             ngx_rtmp_record_done;
 
@@ -42,6 +44,9 @@ static ngx_int_t ngx_rtmp_record_node_close(ngx_rtmp_session_t *s,
 static void  ngx_rtmp_record_make_path(ngx_rtmp_session_t *s,
        ngx_rtmp_record_rec_ctx_t *rctx, ngx_str_t *path);
 static ngx_int_t ngx_rtmp_record_init(ngx_rtmp_session_t *s);
+static ngx_int_t
+ngx_rtmp_record_ensure_directory(ngx_rtmp_session_t *s, ngx_str_t *path);
+
 
 
 static ngx_conf_bitmask_t  ngx_rtmp_record_mask[] = {
@@ -373,6 +378,7 @@ ngx_rtmp_record_make_path(ngx_rtmp_session_t *s,
     ngx_rtmp_record_app_conf_t     *rracf;
     u_char                         *p, *l;
     struct tm                       tm;
+	ngx_str_t                       spath;
 
     static u_char                   buf[NGX_TIME_T_LEN + 1];
     static u_char                   pbuf[NGX_MAX_PATH + 1];
@@ -388,6 +394,19 @@ ngx_rtmp_record_make_path(ngx_rtmp_session_t *s,
     p = ngx_cpymem(p, rracf->path.data,
                 ngx_min(rracf->path.len, (size_t)(l - p - 1)));
     *p++ = '/';
+	
+	p = ngx_cpymem(p, s->host_in.data,
+                ngx_min(s->host_in.len, (size_t)(l - p - 1)));
+	*p++ = '/';
+
+	p = ngx_cpymem(p, s->app.data,
+                ngx_min(s->app.len, (size_t)(l - p - 1)));
+	*p++ = '/';
+
+	spath.data = pbuf;
+	spath.len = p - pbuf;
+	ngx_rtmp_record_ensure_directory(s, &spath);
+		
     p = (u_char *)ngx_escape_uri(p, ctx->name, ngx_min(ngx_strlen(ctx->name),
                 (size_t)(l - p)), NGX_ESCAPE_URI_COMPONENT);
 
@@ -584,6 +603,106 @@ done:
 
     return NGX_OK;
 }
+
+static ngx_int_t
+ngx_rtmp_record_ensure_directory(ngx_rtmp_session_t *s, ngx_str_t *path)
+{
+    size_t                    len;
+    ngx_file_info_t           fi;
+    ngx_rtmp_record_ctx_t       *ctx;
+    ngx_rtmp_record_app_conf_t  *hacf;
+
+    static u_char  zpath[NGX_MAX_PATH + 1] = {0};
+
+    hacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_record_module);
+
+    if (path->len + 1 > sizeof(zpath)) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, "record: too long path");
+        return NGX_ERROR;
+    }
+
+    ngx_snprintf(zpath, sizeof(zpath), "%V%Z", path);
+
+    if (ngx_file_info(zpath, &fi) == NGX_FILE_ERROR) {
+
+        if (ngx_errno != NGX_ENOENT) {
+            ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                          "record: " ngx_file_info_n " failed on '%V'", path);
+            return NGX_ERROR;
+        }
+
+        /* ENOENT */
+
+        if (ngx_create_full_path(zpath, NGX_RTMP_RECORD_DIR_ACCESS) == NGX_FILE_ERROR) {
+            ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                          "record: " ngx_create_dir_n " failed on '%V'", path);
+            return NGX_ERROR;
+        }
+
+        ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                       "record: directory '%V' created", path);
+
+    } else {
+
+        if (!ngx_is_dir(&fi)) {
+            ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                          "record: '%V' exists and is not a directory", path);
+            return  NGX_ERROR;
+        }
+
+        ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                       "record: directory '%V' exists", path);
+    }
+
+    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_record_module);
+
+    len = path->len;
+    if (path->data[len - 1] == '/') {
+        len--;
+    }
+
+    if (len + 1 + ngx_strlen(ctx->name) + 1 > sizeof(zpath)) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, "record: too long path");
+        return NGX_ERROR;
+    }
+
+    ngx_snprintf(zpath, sizeof(zpath) - 1, "%*s/%s%Z", len, path->data,
+                 ctx->name);
+
+    if (ngx_file_info(zpath, &fi) != NGX_FILE_ERROR) {
+
+        if (ngx_is_dir(&fi)) {
+            ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                           "record: directory '%s' exists", zpath);
+            return NGX_OK;
+        }
+
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                      "record: '%s' exists and is not a directory", zpath);
+
+        return  NGX_ERROR;
+    }
+
+    if (ngx_errno != NGX_ENOENT) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                      "record: " ngx_file_info_n " failed on '%s'", zpath);
+        return NGX_ERROR;
+    }
+
+    /* NGX_ENOENT */
+
+    if (ngx_create_full_path(zpath, NGX_RTMP_RECORD_DIR_ACCESS) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                      "record: " ngx_create_dir_n " failed on '%s'", zpath);
+        return NGX_ERROR;
+    }
+
+    ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                   "record: directory '%s' created", zpath);
+
+    return NGX_OK;
+}
+
 
 
 static ngx_int_t

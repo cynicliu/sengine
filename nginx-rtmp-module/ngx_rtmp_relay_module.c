@@ -8,6 +8,7 @@
 #include <ngx_core.h>
 #include "ngx_rtmp_relay_module.h"
 #include "ngx_rtmp_cmd_module.h"
+#include "ngx_rtmp_live_module.h"
 
 
 static ngx_rtmp_publish_pt          next_publish;
@@ -590,11 +591,11 @@ ngx_rtmp_relay_create_remote_ctx(ngx_rtmp_session_t *s, ngx_str_t* name,
 
     rctx = ngx_rtmp_relay_create_connection(&cctx, name, target, &s->host_in, &s->app);
     if(rctx){
-    	rs = rctx->session;
-    	if (ngx_rtmp_relay_copy_str(rs->connection->pool, &rs->args, &s->args) != NGX_OK){
-			/* revert rs->args.len back to 0 */
-			rs->args.len = 0;
-		}
+        rs = rctx->session;
+        if (ngx_rtmp_relay_copy_str(rs->connection->pool, &rs->args, &s->args) != NGX_OK){
+            /* revert rs->args.len back to 0 */
+            rs->args.len = 0;
+        }
     }
     
     return rctx;
@@ -651,12 +652,14 @@ ngx_rtmp_relay_create(ngx_rtmp_session_t *s, ngx_str_t *name,
         ngx_rtmp_relay_create_ctx_pt create_play_ctx)
 {
     ngx_rtmp_relay_app_conf_t      *racf;
+    ngx_rtmp_live_app_conf_t       *lacf;
     ngx_rtmp_relay_ctx_t           *publish_ctx, *play_ctx, **cctx;
     ngx_uint_t                      hash;
     ngx_flag_t                      bexist = 0;
     u_char                          stream_name[NGX_RTMP_MAX_URL];
 
     racf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_relay_module);
+    lacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_live_module);
     if (racf == NULL) {
         return NGX_ERROR;
     }
@@ -668,13 +671,14 @@ ngx_rtmp_relay_create(ngx_rtmp_session_t *s, ngx_str_t *name,
 
             if ((*cctx)->name.len == name->len
             && !ngx_memcmp(name->data, (*cctx)->name.data,
-                name->len))
+                name->len)
+            && !(*cctx)->duplicate)
             {
                 break;
             }
         }
 
-        if (*cctx) {
+        if (*cctx && !lacf->drop_old_publisher) {
             play_ctx = (*cctx)->play;
             for (; play_ctx; play_ctx = play_ctx->next) {
 
@@ -684,13 +688,16 @@ ngx_rtmp_relay_create(ngx_rtmp_session_t *s, ngx_str_t *name,
                     && play_ctx->url.len == target->url.url.len
                     && !ngx_memcmp(play_ctx->url.data, target->url.url.data, target->url.url.len))
                 {
-        			ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
                     "Exist: relay: name='%V'  url='%V', ctx: name='%V' url='%V'",
                     name, &target->url.url, &play_ctx->name, &play_ctx->url);
                     bexist = 1;
                     break;
                 }
             }
+        }
+        else if (*cctx) {
+            (*cctx)->duplicate = 1;
         }
     }
 
@@ -703,12 +710,13 @@ ngx_rtmp_relay_create(ngx_rtmp_session_t *s, ngx_str_t *name,
         return NGX_ERROR;
     }
 
-    hash = ngx_hash_key(name->data, name->len);
+    hash = ngx_hash_key(stream_name, s->app.len + name->len + 1);
     cctx = &racf->ctx[hash % racf->nbuckets];
     for (; *cctx; cctx = &(*cctx)->next) {
         if ((*cctx)->name.len == name->len
             && !ngx_memcmp(name->data, (*cctx)->name.data,
-                name->len))
+                name->len)
+            && !(*cctx)->duplicate)
         {
             break;
         }
@@ -731,7 +739,6 @@ ngx_rtmp_relay_create(ngx_rtmp_session_t *s, ngx_str_t *name,
     publish_ctx->play = play_ctx;
     play_ctx->publish = publish_ctx;
     *cctx = publish_ctx;
-
     return NGX_OK;
 }
 
@@ -1438,7 +1445,6 @@ ngx_rtmp_relay_handshake_done(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     return ngx_rtmp_relay_send_connect(s);
 }
 
-
 static void
 ngx_rtmp_relay_close(ngx_rtmp_session_t *s)
 {
@@ -1524,9 +1530,12 @@ ngx_rtmp_relay_close(ngx_rtmp_session_t *s)
     }
     ctx->publish = NULL;
 
-    hash = ngx_hash_key(ctx->name.data, ctx->name.len);
+    //hash = ngx_hash_key(ctx->name.data, ctx->name.len);
     cctx = &racf->ctx[hash % racf->nbuckets];
     for (; *cctx && *cctx != ctx; cctx = &(*cctx)->next);
+
+    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                              "relay: remove cctx:%p", *cctx);
     if (*cctx) {
         *cctx = ctx->next;
     }
